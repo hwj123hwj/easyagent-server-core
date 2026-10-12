@@ -1,70 +1,65 @@
 # RFC 001：可嵌入企业应用的 Agent 核心
 
-状态：提案。日期：2026-10-12。项目名暂定 EasyAgent Server Core。
+状态：设计提案，尚无实现。修订日期：2026-10-12。
 
-## 1. 定位与约束
+本轮收敛：核心只保留模型、工具、有界循环、权限/审批与事件。会话存储、持久任务和多 worker 属于宿主需求，不作为运行核心的前置条件。[评审 001](REVIEW-001-OPERATION-CAPABILITY.md) 的采纳说明记录了受控操作边界。
 
-在 GitHub 维护通用源码；宿主引入固定版本，在自己的 API/worker 进程中实例化助手。项目交付可嵌入核心及虚构示例，不交付必需独立部署的 Agent 平台。
+## 1. 定位与范围
 
-核心负责有界模型/工具循环和协议。宿主负责登录、权限、实际数据、会话/任务存储、HTTP/SSE、调度和生产发布。业务特定的字段、规则、来源和配置不进入公开核心。
+在 GitHub 维护通用源码；宿主引入固定版本，在自己的进程中实例化助手。最简单集成是传入可信身份、历史消息、Provider、工具及权限回调，然后执行一次请求并消费事件。
 
-1. 工具显式注册，默认拒绝未知工具，每次调用重新鉴权。
-2. 模型仅提出查询名称与业务参数，不能修改身份、工具集合、endpoint 或预算。
-3. Chat/Agent 共用有界执行器，不迁入 Goal、Workflow、命令或生成代码执行。
-4. 会话、任务、证据和公开事件提供宿主接口，不强制安装 PG/Redis 或某个 Web 框架。
-5. 持久性、多 Pod 和崩溃恢复取决于宿主适配器履行合同，不能仅由进程内锁保证。
-6. 库级封装限制模型能力，不宣称隔离共享进程被完全控制后的权限。
+核心交付五部分：模型协议与流式调用、受约束的工具注册、有界执行循环、逐次授权及可选审批、公开事件。不实现独立 Agent 平台、Goal、Workflow、命令执行、动态插件、数据库、队列或调度器。
 
-## 2. 嵌入架构
+工具由宿主明确注册，默认为无工具；未知名称拒绝。模型只能提出工具名称与业务参数，不能指定身份、工具集合、连接、系统提示或预算。工具可以读取，也可以是有明确资源范围的单一业务操作；不提供通用执行入口。
+
+首个宿主先接入业务查询和运维只读诊断，不因公共协议支持操作就开放生产写权限。实际业务字段、来源、规则、身份和配置留在宿主仓库。
+
+## 2. 最小嵌入架构
 
 ```mermaid
 flowchart TD
-  UI[宿主网站] --> API[宿主 API：登录、权限、会话与流式路由]
-  API --> Business[数据助手配置]
-  API --> Ops[运维助手配置]
-  Business --> Core[引入源码的通用 Agent 核心]
-  Ops --> Core
-  Core --> Model[宿主模型配置与 Provider]
-  Core --> Policy[宿主 Authorizer：每次调用校验]
-  Policy --> Tools[宿主具名只读工具]
-  Tools --> Sources[业务数据 / 对象产物 / 定时任务记录]
-  Core --> Storage[宿主 SessionStore / RunStore / EventSink]
-  API --> Queue[宿主任务分发]
-  Queue --> Worker[宿主既有 worker：嵌入相同核心]
-  Worker --> Core
+  Host[宿主：登录、历史与 UI] --> Runner[核心：Definition 与有界循环]
+  Runner --> Provider[模型 Provider / 宿主 Router 客户端]
+  Runner --> Registry[显式工具注册与参数校验]
+  Registry --> Auth[宿主：逐次身份与资源授权]
+  Auth --> Decision{需要审批?}
+  Decision -->|否| Execute[宿主：具名业务工具]
+  Decision -->|是| Approval[宿主审批与执行前复核]
+  Approval --> Execute
+  Execute --> Runner
+  Runner --> Events[公开流式事件]
+  Events --> Host
 ```
 
-图中的组件是 Go 包和职责，不是必须拆出的服务。工具通过函数/接口调用，无强制 RPC、查询代理服务或新增 Agent Pod。API 处理即时问答；宿主可将长分析/排查交给既有 worker。两条路径使用同一权限与工具执行链。
+授权通过后，普通读取直接执行；需要审批的调用取得批准后复核权限与目标状态再执行。图中组件是职责和接口，不要求新服务、RPC 或新增 Pod。
 
-拟议公开布局：
+拟议布局：
 
 ```text
-core/model/            消息和 Provider 接口
-core/tool/             schema、调用、Observation 协议
-core/runner/           有界循环、预算、取消和重复查询守卫
-core/agent/            Definition、依赖组装和执行入口
-core/session/          上下文与公开历史合同
-core/run/              步骤、检查点、执行权与恢复合同
-core/event/            公开事件和模型预览协议
-providers/openai/      固定配置的兼容 HTTP provider
-examples/embedded/     宿主内嵌两个虚构助手，无独立服务要求
-examples/host-adapters/ 内存示例及持久适配器参考
-NOTICE.md              上游来源与本地改造映射
+core/model/        消息、Provider 和模型流事件
+core/tool/         定义、调用、结果与具名工具注册
+core/runner/       Definition、预算、取消、授权/审批执行链
+core/event/        公开回复与进度事件
+providers/openai/  可选固定配置的兼容 HTTP provider
+examples/embedded/ 内存虚构工具、宿主历史与审批示例
+NOTICE.md          来源与改造映射
 ```
 
-`core/` 只依赖 Go 标准库和内部协议，不反向依赖 provider、数据库、Redis、Web 框架或宿主应用。provider 与适配器按需要引入，宿主可以沿用既有 Router HTTP 实现。纯核心目录需要可按清单复制，禁止藏有对完整 SDK 或私有包的依赖。
+`core/` 只依赖 Go 标准库和内部协议，不反向依赖 provider、数据库、Redis、Web 框架或完整 SDK。现有 Router 固定 HTTP 调用直接适配 Provider，不为模型请求引入 Eino。兼容 provider 不是强制依赖；模型 endpoint 与凭据来自可信宿主配置，不来自模型参数。
 
-## 3. AgentDefinition 与宿主依赖
+## 3. 执行入口与助手定义
 
-Definition 保存 ID/版本、提示模板版本、工具名称/版本集合、模型策略、Chat/Agent 预算及输出规则。它由宿主在启动或受控配置流程中创建；用户不能上传定义、凭据或系统提示。
+Definition 由宿主创建，包含 ID/版本、提示模板、模型策略、工具名称/版本集合、Chat/Agent 预算及输出规则。业务助手与运维助手使用不同定义和工具集合；配置不替代权限校验。
 
-Dependencies 包含 Provider、Authorizer、ToolExecutor、SessionStore、RunStore 和 EventSink。权限适配器缺失时不提供生产执行；内存适配器仅用于 demo/单进程环境。恢复性存储未提供时明确不支持后台持久恢复，不能静默降级。
+执行请求包含宿主构造的 Principal、执行标识、模式、历史消息与当前问题。历史消息须按当前账户、助手和数据范围筛选。每个执行拥有独立可变历史；共享不可变定义或 Provider 连接，不共享用户上下文。
 
-宿主在真实登录上下文构造 Principal：tenant、subject 和授权引用。单租户应用可由宿主配置固定 tenant；核心不要求引入额外企业 IAM。身份不来自模型、用户正文或工具返回值。
+有工具的执行必须提供 Authorizer 和已注册工具；缺失或检查失败时拒绝调用。纯文本 Chat 可不注册工具。EventHandler 可省略以收集最终结果；ApprovalGate 仅在需要人工确认时使用。核心无必需 SessionStore、RunStore 或持久 EventSink。
 
-助手实例按会话/执行上下文绑定账户和范围；共享 Provider 连接可以，但不能共享可变模型历史。两类助手分别注册工具和会话目录。助手配置不是额外权限来源。
+宿主负责登录、助手资格、历史/结果读取权限。核心使用可信 Principal 逐次调用 Authorizer；身份不来自用户正文、模型或工具输出。取消用 `context.Context`，审批等待也必须可以取消和超时。
 
-## 4. 工具与权限接口草案
+## 4. 工具合同草案
+
+以下示意权限、操作标识和结果的边界，不是可导入 API，也不承诺字段已实现：
 
 ```go
 type Principal struct {
@@ -73,10 +68,20 @@ type Principal struct {
 }
 
 type ExecutionContext struct {
-    Principal Principal
-    RunID     string
-    StepID    string
-    Fence     uint64
+    Principal   Principal
+    RunID       string
+    CallID      string
+    OperationID string // 写操作的稳定标识由宿主提供，不来自模型
+}
+
+type ToolSpec struct {
+    Name             string
+    Version          string
+    Effect           string // 必填且限于 read / write
+    InputSchema      json.RawMessage
+    RequiresApproval bool
+    Timeout          time.Duration
+    MaxResultBytes   int
 }
 
 type ToolCall struct {
@@ -85,10 +90,11 @@ type ToolCall struct {
     Arguments json.RawMessage
 }
 
-type Observation struct {
+type ToolResult struct {
+    Status     string // available / missing / denied / invalid / unavailable;
+                      // applied / conflict / partial / unknown
     EvidenceID string
-    Status     string // available / missing / denied / unavailable / invalid
-    Summary    string // 范围过滤与脱敏后的证据摘要
+    Summary    string // 可进入模型的范围过滤与脱敏摘要
 }
 
 type Authorizer interface {
@@ -96,88 +102,98 @@ type Authorizer interface {
 }
 
 type ToolExecutor interface {
-    Execute(context.Context, ExecutionContext, ToolCall) (Observation, error)
+    Execute(context.Context, ExecutionContext, ToolCall) (ToolResult, error)
 }
 ```
 
-这是接口草案，尚非可导入包。ExecutionContext 由宿主和核心创建，模型只提出 ToolCall。完整权限接口还覆盖助手、会话、任务、历史与证据读取；每次执行前验证最新授权，失败默认拒绝。后台恢复从宿主可信存储重建账户，再重新取授权，不只回放旧权限快照。
+ToolSpec 是可信注册元数据，Effect 和审批规则不能由模型覆盖；错误或未声明的 Effect 拒绝注册。声明 read 不证明实现或凭据真的只读。输入 schema 之外仍须在宿主核对日期、资源归属、分页、范围与目标状态。用户过滤条件与实际授权取交集。
 
-工具定义包括严格输入 schema、版本、可信并发声明、超时与结果大小限制。参数校验仍需核对日期、资源归属、分页和范围。模型不能指定任意 SQL、URL、bucket、连接参数、subject 或 tenant。业务过滤条件与服务端授权取交集。
+读工具只注入必要查询接口；写工具只注入对应单一操作接口。不要传入全应用 service container、管理连接或凭据集合。模型不能传入任意 SQL、URL、bucket、连接、命令、subject 或 tenant；资源 ID 由业务代码解析并核对范围。
 
-宿主只给查询工具注入必要的只读接口/凭据，不把全应用 DB 管理连接或服务容器传给核心。对象检查可提供受限元信息和小型清单读取；不顺带获取日志全文、ZIP 或员工对话。数据库/对象存储权限仍由真实后端执行。
+工具是构建时受审查的 Go 回调，不允许模型上传或自动加载实现。结果中的错误、部分完成和未知状态不得被模型描述成确定成功。证据 ID 由宿主登记；未接入、缺失、拒绝、陈旧快照与不可达应分别表达。
 
-ToolExecutor 为受信 Go 代码，不能上传、自动发现或动态加载。核心执行链固定为 schema 校验 → 预算与执行权校验 → Authorizer → Execute → 结果范围过滤与脱敏 → Evidence 登记。适配器回调不能通过模型参数跳过这条链。
+## 5. 固定执行链与审批
 
-证据 ID 由宿主登记，模型只引用存在且当前获准的证据。403/404/超时/不合法产物分别报告；引用校验不能完全保证模型事实判断正确，结果需区分事实、推测与未核验项。
+每次调用依次经过：
 
-## 5. Chat / Agent 与执行预算
+```text
+注册/版本与 schema 校验
+  → 预算、取消与宿主执行资格检查
+  → 当前身份、参数和资源授权
+  → 如需审批：构造具体操作提案并取得有效批准
+  → 审批后复核授权、预算、执行资格及目标状态
+  → 执行具名工具
+  → 范围过滤与脱敏，登记证据/操作结果
+  → 模型摘要与公开事件
+```
 
-Chat 完成当前问题，允许少量只读查询。Agent 主动组合多步查询并保存分析/诊断结果，步骤是数据结构和事件，不是脚本或 Workflow DSL。
+权限检查与人工审批是两个步骤。普通授权读取不需要弹出审批；高影响操作按宿主策略确认。审批不能授予原本没有的权限，也不能扩大工具集合。
 
-建议初始预算：Chat 90 秒/8 次模型请求/12 次工具调用，Agent 5 分钟/16 次模型请求/24 次工具调用。正式值由宿主结合现有时限和负载验证；宿主可以收紧，用户和模型不能扩大。并发默认串行，只有可信适配器声明安全才允许最多 2 路并发。
+审批接口由宿主提供：可以等待 UI 返回，也可以返回 pending，让本次执行以 approval.required 结束。没有审批通道也按 pending 处理，绝不执行。核心不内置审批数据库、工作流或长期挂起任务；继续执行由宿主重新发起并校验批准，不盲目回放整个历史循环。
 
-同时限定响应字节、工具超时、输入/输出 token、重试及账户/tenant 并发。模型调用前预留预算；未知 token 用量或价格时不能承诺精确金额硬上限。预算耗尽明确终止，不把部分诊断变成成功。
+操作提案先确定工具/版本、规范化参数、具体资源、预计影响和必要目标版本。批准需绑定账户、操作标识、提案指纹、有效期与消费状态，不能只用一个“已同意”布尔值。模型和工具输出不能伪造批准。参数、资源或关键目标状态变化须重新确认；批准、业务去重和审计记录由宿主保存。
 
-Chat 与 Agent 的结果以宿主校验和成功提交为准。Agent 可要求有限必查项与证据，不用模型 Goal 评估器无限继续。诊断任务完成不表示生产问题已修复。
+公开审批事件只展示允许用户看到的提案摘要和关联 ID；它本身不是可重用的执行凭证。批准消费与业务执行之间的故障需结合 §6 的操作标识和结果查询处理，不能靠一次性批准掩盖重复副作用。
 
-## 6. 会话、事件与宿主 HTTP
+## 6. 受控操作的最小要求
 
-会话按账户、助手和数据权限边界隔离。模型私有历史与公开问题/最终答案分别处理；较窄权限不能继承旧的较宽工具证据。默认同一会话最多一个活跃执行；用户可新建其他会话。
+公共核心允许 `job.retry(job_id)` 等具名操作；启用前由宿主证明真实权限、影响范围与业务语义。读和写共用执行链，但写操作需要额外的去重、结果确认与审计，不能认为风险等同读取。
 
-EventSink 接收 turn、step.start/progress/end、delta、done 和 error，公开内容经过字段白名单，不包含原始工具参数/结果、模型推理、凭据或上游响应正文。
+- **限定影响**：工具实现限定可操作的对象与数量；宿主预算另限制写调用次数。首个操作示例一次只涉及一个虚构任务，不开放任意批量或配置写入。
+- **不自动重放**：核心默认不自动重试写调用，恢复也不能自动重放。稳定 OperationID 对应同一次用户意图；不同意图必须使用不同 ID，不能仅按相同参数永久去重。
+- **真实幂等**：若业务接口提供持久去重/结果查询，宿主可显式用同一 OperationID 核对并安全继续。一次执行只生效一次须由业务系统验证，`Idempotent=true`、进程内锁或 Run 去重不能证明这一点。
+- **结果不确定**：请求超时、断线或取消不等于未执行。无法确认时返回 unknown 并停止自动操作，查询业务结果或交给人工；partial、conflict 分别报告，不能压成 applied。取消不回滚已经发生的修改。
+- **审计和验证**：业务接口记录操作标识、账户、工具版本、实际影响资源、结果及必要变更摘要。原始审计与给模型的摘要分离。执行结果能查询时优先核对；无法核对则保留未核验状态。
 
-文本 delta 为临时预览，带 attempt/turn/generation 标识；最终答案在宿主事务提交后发布。后台事件持久化可提供递增 seq 和快照恢复；逐 token 重放不是首版承诺。
+首版不实现通用补偿、撤销编排或 dry-run 引擎。宿主有预览/撤销能力时可显式注册具名工具，每次仍需授权和必要审批；预览不是执行授权，补偿不保证回滚。
 
-宿主沿用自己的路由和 UI：即时 Chat 可继续现有 POST + SSE，断线/取消合同由宿主明确；后台 Agent 通常提交后返回任务 ID，再订阅/查询进度和显式取消。核心不要求新建 `/v1` API、统一返回 202 或改变旧问答接口。
+## 7. Chat / Agent、预算与事件
 
-宿主保证对取消、会话切换和迟到事件的隔离。后台订阅断开只停止展示，不隐式创建/取消任务；取消排查不能取消被检查的生产任务。恢复、结果、分页与长订阅需核对当前授权。
+Chat 聚焦当前问题，Agent 允许更主动地组合多步工具调用。两者共用执行器和权限链，不代表只读/可写等级，不要求后台化，也不使用 Goal 评估器无限继续。
 
-## 7. 宿主持久状态与多 worker
+宿主为两种模式设置有限的总时长、模型轮数、工具次数、输出大小、重试次数与并发；写工具另有调用上限。不存在无限预算或由模型扩大预算的路径。默认串行；并行仅用于宿主声明安全的读取，写操作不并行。具体数值由宿主结合请求时限和实测负载确定。
 
-SessionStore 保存会话与完整公开轮。RunStore 保存执行身份/Definition 版本、状态、预算、步骤、证据引用、幂等键、执行权和检查点；EventSink 可与 RunStore 同事务发布最终事件。
+循环检测、模型错误、预算耗尽和取消都明确终止；保留已知结果并标记未完成。token 与金额额度依赖可信用量信息，未知价格/用量时不宣称精确金额硬上限。超时通过 context 传播；工具实现及底层客户端须支持期限和取消，核心不能强制杀死任意 Go 回调。
 
-后台状态为 queued → running → succeeded / failed / cancelled / interrupted。取消先停止后续请求；明确取消不自动恢复。Definition/工具合同不兼容时 interrupted，禁止偷偷换版本重跑。
+公开事件包括 delta、tool.start/progress/end、approval.required、done、error。事件含执行/轮/代次标识，公开字段白名单不得包含模型私有推理、原始工具结果、凭据或上游错误正文。进度描述具体查询与已知状态，不展示思维链。
 
-生产多 worker 由宿主 PG/Redis 或等价组件承担：Run 与分发意图原子接收，Redis 仅唤醒；幂等键、领取、期限租约和递增 fence 防重复提交。租约过期停止后续调用，最终提交验证当前执行权，旧 worker 无法覆盖新结果。
+文本 delta 是临时预览；只有模型流完整结束且最终结果校验通过，才能产生核心完成结果。宿主如需持久化，保存成功后再向 UI 发布其最终成功状态。待批准使用 approval.required 终止或暂停当前展示，不作为已完成回答。工具变更已 applied 不保证最终回答或持久化成功，恢复应查询操作记录而非重做变更。
 
-已完成步骤复用；未知请求保留已消耗/预留预算，重查按预算计数。飞行中的读取可能重叠，模型请求也不能保证端到端 exactly-once。不得宣称一个进程内锁解决跨 Pod 执行。
+## 8. 会话、HTTP 与持久任务归宿主
 
-核心通过 RunStore 接口使用这些能力，不另建一套生产队列或任务调度服务。宿主需添加明确的 Agent 任务种类、容量与公平调度，不能把新查询任务挤满既有同步/通知 worker。记录排查状态不授权修改生产任务意图。
+宿主负责账户历史、会话列表、切换/继续、刷新恢复、保存与到期策略，向核心提供必要上下文。助手和数据范围不同的历史隔离；权限变窄时不能带入旧的受限证据。默认同一会话一个活跃执行，但并发控制在宿主落实。
 
-## 8. 源码引入与升级
+既有 POST + SSE 可直接消费核心事件；不要求 /v1 API、统一 202、新 UI 或独立服务。宿主通过执行/代次标识忽略迟到事件；用户切换会话不会把旧流写进新会话。取消对话不等于取消被诊断的生产任务。
 
-公开项目先提取并改造 EasyAgent 固定提交的消息/流/provider、工具和必要事件协议，保留 LICENSE/NOTICE。不迁入个人 AgentSession 的工作区、Goal、Workflow、JSONL、全部 hooks 或编码工具。服务端预算/授权和宿主接口独立设计。
+简单即时问答不需要任务队列或检查点。需要长任务、断线后继续或多 worker 时，宿主自行提供持久执行状态与调度，并在每次工具调用前通过可信授权适配器同时核验执行资格；核心不引入 RunStore、fence 或 outbox 协议。
 
-源码引入清单固定目录和依赖；宿主记录上游 repo、tag/SHA、文件映射、import 调整及本地修改。升级先比较源差异，再执行宿主回归；不能覆盖掉已有身份、会话、取消和最终回答校验逻辑。普通模块导入是可选方式，不改变首个宿主源码引入的选择。
+这类宿主需处理原子接收、分发丢失/重复、幂等键、领取/租约、旧 worker 提交和恢复预算。PG/Redis 是可选实现，不属于公共核心交付前提。租约或提交 CAS 不保证外部副作用 exactly-once；恢复时读调用也可能重复，写调用遵守 §6。不同 Definition/工具版本不兼容时停止恢复。
 
-同一份核心源码用于宿主 API 与既有 worker 构建，助手通过 Definition + 工具注册创建。先适配旧问答边界，再接新助手/模式/恢复功能，避免一次替换全部业务协议。
+这些保障按宿主真正启用的功能验收：多 Pod 提供同步问答不自动需要后台 Agent 队列，承诺后台任务接管时才需对应恢复合同。
 
-## 9. 开源示例与私有适配器
+## 9. 源码引入与公开示例
 
-公开 demo 是一个内嵌 Go 程序，创建 data-analyst 和 artifact-diagnostics 两个虚构助手。工具为 schedule.inspect、job.runs、artifacts.inspect、publication.status，只查内存虚构记录。
+从 EasyAgent 固定提交提取消息、流、Provider 与必要工具协议，保留 LICENSE/NOTICE。不迁入个人 AgentSession 的工作区、Goal、Workflow、JSONL、全部 hooks 或编码工具。来源清单记录 repo/tag/SHA、文件映射、import 调整和本地改造。
 
-示例任务：生产产物已生成，但消费端 schema_version 不兼容，报告未生成。逐步核对排程、运行记录、完成标记与消费者状态，展示阻塞点、时间、证据和人工建议。另含 404/403/超时、未到排程、缺失产物、陈旧快照和未接入日志。
+最小 demo 是一个 Go 程序：data-analyst 与 artifact-diagnostics 分别注册虚构查询工具，历史由调用方传入，不依赖数据库、Redis 或独立服务。诊断工具包括 schedule.inspect、job.runs、artifacts.inspect、publication.status。
 
-真实业务 SQL、角色映射、对象路径、内部日志接口、统计口径和生产信息由宿主维护，不进入公开 repo。通用接口存在不代表来源已接入。
+另提供显式启用的虚构 `job.retry` 场景：诊断 → 展示提案 → 宿主批准 → 具名操作 → 结果查询。验证拒绝、pending、过期/变更提案、重复操作标识、partial 与 unknown；不接触真实任务，不把操作注册到默认只读助手。
 
-## 10. 交付路线
+真实 SQL、角色映射、对象路径、统计口径、内部日志与生产信息留在宿主。通用接口存在不表示来源已接入。宿主升级先比较来源差异，再执行授权、会话、取消、SSE 和工具结果回归，不能覆盖私有边界代码。
+
+## 10. 精简交付路线
 
 | 阶段 | 交付 | 完成条件 |
 | --- | --- | --- |
-| v0.1 | 精简可嵌入核心、Definition、工具/权限接口、有界 Chat/Agent、事件、两个虚构助手 | 源码可按清单复制且无完整 SDK/私有依赖；预算、拒绝、取消验证通过 |
-| v0.2 | 会话/任务适配合同、检查点、幂等与执行权、公开事件恢复 | 宿主适配器对真实 PG/Redis 多 worker 争抢/接管验证通过；不要求新增服务 |
-| v0.3 | 首个真实宿主的源码引入、业务与运维助手、账户历史和排查证据 | 旧接口兼容，授权隔离、会话切换、恢复与实际查询通过 |
+| v0.1 | 五部分最小核心、可选 HTTP provider、无外部设施的虚构嵌入示例 | 源码可复制构建；授权/预算/取消/流式与审批拒绝通过；写操作默认不重试 |
+| 宿主接入 | 既有 Router、业务查询/诊断工具、历史与 UI 适配 | 旧接口、账户隔离、会话切换/继续和查询结果回归通过 |
+| 按实际需求扩展 | 具名业务操作，或宿主长任务/多 worker 支持 | 仅启用的能力通过对应业务幂等、审批、审计或恢复验收 |
 
-优先完成宿主接入真正需要的能力，不预先做独立服务平台。核心与适配器的生产就绪分别验收，demo 成功不等于耐久恢复通过。
+不把通用 PG/Redis 适配器、Workflow、后台任务平台或全部企业治理字段排成必经版本。首版采用受控操作最小合同，不预建通用变更管理平台。
 
-## 11. 同进程安全边界
+## 11. 同进程边界与依据
 
-核心不注册任何命令/脚本/文件编辑入口，不把对象清单或日志指令当作配置。每步授权与参数限制在代码内执行，宿主使用查询型适配器及只读后端。
+嵌入核心限制模型入口，不提供 OS 隔离。宿主进程被完全控制后，攻击者可能访问其已有凭据；宿主继续负责代码、依赖、容器及后端权限安全，不以本项目为由默认拆服务。
 
-嵌入并不降低这一约束，但不能提供 OS/进程隔离：攻击者若获得宿主进程任意代码执行，可能访问宿主已有凭据和连接。库的工具限制主要防止模型越权和过度自主，不把库封装当作解决宿主 RCE 的沙箱。宿主继续负责代码、依赖、容器与网络安全，不因本项目默认增加独立部署。
-
-## 12. 公开依据
-
-- [EasyAgent 架构](https://github.com/hwj123hwj/easyagent/blob/d90804fbe5cf488e6ace810cff925f7cc8b8c6d9/docs/ARCHITECTURE.md)：所参考源码边界。
-- [OWASP Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)：限制工具及凭据，并在真实数据访问处授权。
-- [Kubernetes 应用安全](https://kubernetes.io/docs/concepts/security/application-security-checklist/)：宿主部署的运行权限参考，不作为新增服务要求。
+- [EasyAgent 架构](https://github.com/hwj123hwj/easyagent/blob/d90804fbe5cf488e6ace810cff925f7cc8b8c6d9/docs/ARCHITECTURE.md)：源码参考边界。
+- [OWASP Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)：最小工具与权限、下游授权和高影响操作审批。
