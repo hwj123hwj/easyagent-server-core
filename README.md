@@ -70,5 +70,6 @@ go run ./examples/embedded -scenario duplicate
 4. [评审 001 与采纳说明](docs/REVIEW-001-OPERATION-CAPABILITY.md)：保留原始意见，并记录本轮采纳与修正。当前方案以 RFC 为准。
 5. [嵌入接入与运行示例](docs/INTEGRATION.md)：实际 API、预算、审批、源码复制及未实现范围。
 6. [首版验证记录](docs/VALIDATION.md)：本地检查、示例预期与验证边界。
+7. [评审 002：首版实现的合同收口](docs/REVIEW-002-IMPLEMENTATION-CLOSURE.md)：写操作影响核对与取消语义的修正记录。
 
 本仓库采用 [MIT License](LICENSE)，来源说明见 [NOTICE](NOTICE.md)。实现引入 EasyAgent 源码时保留来源 LICENSE、版权和文件映射。当前参考提交为 `d90804fbe5cf488e6ace810cff925f7cc8b8c6d9`，升级按文件审查。

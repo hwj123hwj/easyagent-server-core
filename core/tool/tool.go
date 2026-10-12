@@ -96,8 +96,13 @@ type Progress func(string) error
 
 type Tool struct {
 	Spec Spec
-	// Callbacks are synchronous. Prepare must be read-only; Execute must honor
-	// context cancellation and Progress errors and finish all work before returning.
+	// Callbacks are synchronous. Execute must honor context cancellation and
+	// Progress errors and finish all work before returning.
+	//
+	// Prepare is read-only and required for every write, whether or not
+	// RequiresApproval is set: it is the only source of the resources, target
+	// versions and impact an operation is bound to, and is re-run after
+	// authorization to detect a changed target.
 	Prepare func(context.Context, ExecutionContext, Call) (Intent, error)
 	Execute func(context.Context, ExecutionContext, Call, Progress) (Result, error)
 }

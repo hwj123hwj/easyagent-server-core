@@ -164,6 +164,14 @@ func TestMissingAuthorizationOrWriteIdentityFailsConfiguration(t *testing.T) {
 	if _, err := runner.New(definition(tt), d); !errors.Is(err, runner.ErrConfiguration) {
 		t.Fatal(err)
 	}
+	// A write without Prepare cannot declare its resources or target version, so
+	// registration must fail even when no human approval is required.
+	tt.Spec.Effect = tool.Write
+	tt.Spec.RequiresApproval = false
+	tt.Prepare = nil
+	if _, err := runner.New(definition(tt), deps(script())); !errors.Is(err, runner.ErrConfiguration) {
+		t.Fatal("write without Prepare accepted")
+	}
 	tt.Spec.Effect = ""
 	if _, err := runner.New(definition(tt), deps(script())); err == nil {
 		t.Fatal("undeclared effect accepted")
@@ -313,6 +321,9 @@ func TestBudgetsRepetitionAndCancellation(t *testing.T) {
 				expected = runner.ErrLoop
 			case "write disabled":
 				tt.Spec.Effect = tool.Write
+				tt.Prepare = func(context.Context, tool.ExecutionContext, tool.Call) (tool.Intent, error) {
+					return tool.Intent{Summary: "retry one fictional job", Resources: []tool.Resource{{ID: "job-1", Version: "v1"}}}, nil
+				}
 				def.Tools = []tool.Tool{tt}
 				def.AgentBudget.MaxWrites = 0
 				expectedCalls = 0
@@ -367,6 +378,50 @@ func TestStreamFailureHandlerFailureAndUnknownEvidence(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Fatal("raw error leaked")
+			}
+		})
+	}
+}
+
+func TestCancellationSurfacesStructuredCode(t *testing.T) {
+	for _, name := range []string{"deadline", "cancelled", "provider returns context error"} {
+		t.Run(name, func(t *testing.T) {
+			provider := model.ProviderFunc(func(ctx context.Context, r model.Request, emit func(string) error) (model.Response, error) {
+				switch name {
+				case "provider returns context error":
+					// A provider may surface cancellation as its own error; it must
+					// not be mistaken for a model failure.
+					return model.Response{}, context.DeadlineExceeded
+				default:
+					<-ctx.Done()
+					return model.Response{}, ctx.Err()
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			if name == "cancelled" {
+				cancel()
+			}
+			var events []event.Event
+			_, err := build(t, definition(), deps(provider)).Run(ctx, req(), func(e event.Event) error {
+				events = append(events, e)
+				return nil
+			})
+			var failure *runner.Failure
+			if !errors.As(err, &failure) || failure.Code != "cancelled_or_timed_out" {
+				t.Fatalf("unstructured failure: %+v (err=%v)", failure, err)
+			}
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("lost context cause: %v", err)
+			}
+			var sawCode bool
+			for _, e := range events {
+				if e.Kind == event.Error && e.Code == "cancelled_or_timed_out" {
+					sawCode = true
+				}
+			}
+			if !sawCode {
+				t.Fatalf("terminal event missing cancellation code: %+v", events)
 			}
 		})
 	}
@@ -502,11 +557,17 @@ func TestModePolicyAndExplicitLowRiskWrite(t *testing.T) {
 		}
 		return tool.Result{Status: tool.Applied, Summary: "low-risk fixture operation"}, nil
 	})
+	// Skipping human approval still keeps the resource/target binding: Prepare
+	// stays mandatory and is re-run to confirm the target has not changed.
 	tt.Spec.RequiresApproval = false
-	tt.Prepare = nil
+	prepared := 0
+	tt.Prepare = func(context.Context, tool.ExecutionContext, tool.Call) (tool.Intent, error) {
+		prepared++
+		return tool.Intent{Summary: "retry one fictional job", Resources: []tool.Resource{{ID: "job-1", Version: "v1"}}}, nil
+	}
 	d := deps(script(proposed("job.retry", "c1", `{"id":"job-1"}`), model.Response{Text: "requested", FinishReason: model.Stop}))
 	out, err := build(t, definition(tt), d).Run(context.Background(), req(), nil)
-	if err != nil || calls != 1 || out.State != runner.Completed {
-		t.Fatalf("out=%+v err=%v", out, err)
+	if err != nil || calls != 1 || out.State != runner.Completed || prepared != 2 {
+		t.Fatalf("out=%+v err=%v calls=%d prepared=%d", out, err, calls, prepared)
 	}
 }

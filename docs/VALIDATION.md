@@ -6,6 +6,7 @@
 
 - go test -race ./...：通过。覆盖严格参数、授权拒绝、审批缺失/绑定/过期/撤权/目标变更、写操作不确定/部分完成、预算、取消、流中断、证据引用和并发上下文。
 - go vet ./...：通过。
+- 评审 002 收口后重跑：`gofmt`、`go vet`、`go test -race` 与九个场景全部通过；新增「写工具缺少 Prepare 注册被拒」与「取消返回结构化错误码」回归。见 [评审 002](REVIEW-002-IMPLEMENTATION-CLOSURE.md)。
 - 源码复制测试：将四个 core 包复制到全新临时宿主 module，调整 import，关闭 module 网络下载，实际构建并运行模型/工具循环。
 - HTTP provider：使用本地 httptest，验证固定 endpoint/header、逐字节 UTF-8/SSE 和工具参数拼装、DONE/finish 标记、超大/非法流、私有推理不输出、错误正文不泄露、重定向拒绝与取消；无自动重试。
 - 九个离线场景：合同测试与实际 go run 均通过，见下表。

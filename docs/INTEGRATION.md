@@ -69,7 +69,7 @@ out, err := r.Run(ctx, runner.Request{
 
 核心初版全部串行、无自动重试。默认 Chat 为 90 秒/8 次模型/12 次工具，Agent 为 3 分钟/16 次模型/24 次工具；二者写调用预算默认均为 0。预算还限制单次模型输入字节、累计模型/工具结果字节、每次最大输出 token 和重复读取次数。宿主显式提供 Budget 时必须完整且有限，不支持无限/负数。
 
-写能力须同时注册具名 write 工具、提供 OperationID 回调并设置 MaxWrites；这些不代替 Authorizer。调用前保守预留工具声明的最大结果字节；因此剩余额度不足时即使实际返回很小，也会停止。HTTP provider 另限制请求与 SSE 原始字节，不据此承诺精确 token 或金额账单。
+写能力须同时注册具名 write 工具、提供 OperationID 回调并设置 MaxWrites；这些不代替 Authorizer。**每个 write 工具都必须提供 Prepare，无论是否需要人工审批**：它是资源、目标版本和影响范围的唯一来源，核心据此绑定操作并在鉴权后复核目标是否变化；缺少 Prepare 的 write 在注册阶段即被拒绝。免审批只表示不弹人工确认，不表示跳过资源核对。调用前保守预留工具声明的最大结果字节；因此剩余额度不足时即使实际返回很小，也会停止。HTTP provider 另限制请求与 SSE 原始字节，不据此承诺精确 token 或金额账单。
 
 Outcome 为 completed、pending_approval 或 interrupted，包含已知 Observations。出错后保留已发生操作的记录；unknown/partial 不会交给模型继续操作。读工具错误转换为受限 unavailable 摘要；原始错误不进入模型或公开流。
 

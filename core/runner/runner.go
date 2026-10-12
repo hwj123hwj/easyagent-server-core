@@ -52,14 +52,16 @@ func newRunner(d Definition, deps Dependencies) (*Runner, error) {
 	for _, t := range d.Tools {
 		s := t.Spec
 		if !namePattern.MatchString(s.Name) || s.Version == "" || !utf8.ValidString(s.Description) || s.Timeout <= 0 || s.MaxResultBytes <= 0 ||
-			(s.Effect != tool.Read && s.Effect != tool.Write) || s.Input.Type != "object" || s.Input.Check() != nil || t.Execute == nil ||
-			(s.RequiresApproval && t.Prepare == nil) {
+			(s.Effect != tool.Read && s.Effect != tool.Write) || s.Input.Type != "object" || s.Input.Check() != nil || t.Execute == nil {
+			return nil, ErrConfiguration
+		}
+		// Every write needs a read-only Prepare. It is the only source of the
+		// concrete resources, target versions and impact bound to an operation, so
+		// a write without it cannot be authorized, bound or audited as one.
+		if s.Effect == tool.Write && (t.Prepare == nil || deps.OperationID == nil) {
 			return nil, ErrConfiguration
 		}
 		if _, exists := registered[s.Name]; exists {
-			return nil, ErrConfiguration
-		}
-		if s.Effect == tool.Write && deps.OperationID == nil {
 			return nil, ErrConfiguration
 		}
 		b, err := json.Marshal(s.Input)
@@ -157,7 +159,7 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 	outputBytes := 0
 	for turn = 1; turn <= b.MaxModelCalls; turn++ {
 		if err := ctx.Err(); err != nil {
-			return out, err
+			return fail("cancelled_or_timed_out", err)
 		}
 		mr := model.Request{Model: r.definition.Model, System: system, Messages: cloneMessages(out.History), Tools: definitions, MaxOutputTokens: b.MaxOutputTokens, MaxResponseBytes: b.MaxOutputBytes - outputBytes}
 		// A fresh schema copy prevents a provider from mutating the next turn.
@@ -192,10 +194,15 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 			return fail("stream_stopped", callbackErr)
 		}
 		if err != nil {
+			// A provider that surfaces cancellation as its own error must still be
+			// reported as cancellation, not as a model failure.
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return fail("cancelled_or_timed_out", errors.Join(ctx.Err(), err))
+			}
 			return fail("model_failed", errors.Join(ErrModel, err))
 		}
 		if err := ctx.Err(); err != nil {
-			return out, err
+			return fail("cancelled_or_timed_out", err)
 		}
 		if !utf8.ValidString(response.Text) || (preview.Len() > 0 && preview.String() != response.Text) {
 			return fail("invalid_model_stream", ErrModel)
@@ -239,7 +246,7 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 				}
 			}
 			if err := ctx.Err(); err != nil {
-				return out, err
+				return fail("cancelled_or_timed_out", err)
 			}
 			if err := emit(event.Event{Kind: event.Done, Text: response.Text}); err != nil {
 				return out, err
@@ -249,7 +256,7 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 		}
 		for _, proposed := range response.ToolCalls {
 			if err := ctx.Err(); err != nil {
-				return out, err
+				return fail("cancelled_or_timed_out", err)
 			}
 			t, ok := r.tools[proposed.Name]
 			if !ok || proposed.ID == "" || len(proposed.ID) > 128 || !utf8.ValidString(proposed.ID) || callIDs[proposed.ID] {
@@ -331,40 +338,51 @@ func (r *Runner) execute(ctx context.Context, ec tool.ExecutionContext, c tool.C
 		}
 		ec.OperationID = id
 	}
-	if t.Spec.RequiresApproval {
+	// Writes always produce an intent, whether or not a human approval is
+	// required: it is what binds the operation to its resources and target
+	// versions, and what the post-approval re-check compares against.
+	if t.Spec.Effect == tool.Write {
 		intent, err := t.Prepare(ctx, ec, copyCall(c))
 		if err != nil || !validIntent(intent) {
 			return fail("invalid_operation_proposal", ErrApproval)
 		}
 		p := tool.Proposal{Principal: ec.Principal, RunID: ec.RunID, OperationID: ec.OperationID, Call: copyCall(c), Intent: intent, Fingerprint: fingerprint(ec, c, intent)}
-		decision := tool.Approval{Decision: tool.Pending}
-		if r.dependencies.Approval != nil {
-			gateProposal := p
-			gateProposal.Call = copyCall(p.Call)
-			gateProposal.Intent.Resources = append([]tool.Resource(nil), p.Intent.Resources...)
-			decision, err = r.dependencies.Approval.Approve(ctx, gateProposal)
-			if err != nil {
-				return fail("approval_failed", errors.Join(ErrApproval, err))
+		var expiresAt time.Time
+		if t.Spec.RequiresApproval {
+			decision := tool.Approval{Decision: tool.Pending}
+			if r.dependencies.Approval != nil {
+				gateProposal := p
+				gateProposal.Call = copyCall(p.Call)
+				gateProposal.Intent.Resources = append([]tool.Resource(nil), p.Intent.Resources...)
+				decision, err = r.dependencies.Approval.Approve(ctx, gateProposal)
+				if err != nil {
+					return fail("approval_failed", errors.Join(ErrApproval, err))
+				}
 			}
-		}
-		if err := ctx.Err(); err != nil {
-			return fail("approval_timed_out", err)
-		}
-		if decision.Decision == tool.Pending {
-			view := &event.ApprovalView{Tool: c.Name, OperationID: ec.OperationID, Summary: intent.Summary, Resources: append([]tool.Resource(nil), intent.Resources...), Fingerprint: p.Fingerprint}
-			if err := emit(event.Event{Kind: event.ApprovalRequired, Tool: c.Name, CallID: ec.CallID, Approval: view}); err != nil {
-				return fail("event_failed", err)
+			if err := ctx.Err(); err != nil {
+				return fail("approval_timed_out", err)
 			}
-			return tool.Result{}, &p, nil
-		}
-		if decision.Decision != tool.Approved || decision.Fingerprint != p.Fingerprint || !decision.ExpiresAt.After(time.Now()) {
-			return fail("approval_rejected", ErrApproval)
+			if decision.Decision == tool.Pending {
+				view := &event.ApprovalView{Tool: c.Name, OperationID: ec.OperationID, Summary: intent.Summary, Resources: append([]tool.Resource(nil), intent.Resources...), Fingerprint: p.Fingerprint}
+				if err := emit(event.Event{Kind: event.ApprovalRequired, Tool: c.Name, CallID: ec.CallID, Approval: view}); err != nil {
+					return fail("event_failed", err)
+				}
+				return tool.Result{}, &p, nil
+			}
+			if decision.Decision != tool.Approved || decision.Fingerprint != p.Fingerprint || !decision.ExpiresAt.After(time.Now()) {
+				return fail("approval_rejected", ErrApproval)
+			}
+			expiresAt = decision.ExpiresAt
 		}
 		if err := r.dependencies.Authorizer.CheckTool(ctx, ec, copyCall(c)); err != nil {
 			return fail("tool_denied", errors.Join(ErrDenied, err))
 		}
 		latest, err := t.Prepare(ctx, ec, copyCall(c))
-		if err != nil || !validIntent(latest) || fingerprint(ec, c, latest) != p.Fingerprint || !decision.ExpiresAt.After(time.Now()) {
+		if err != nil || !validIntent(latest) || fingerprint(ec, c, latest) != p.Fingerprint {
+			return fail("proposal_changed", ErrApproval)
+		}
+		// An approval must still be valid after the re-check, not just when read.
+		if t.Spec.RequiresApproval && !expiresAt.After(time.Now()) {
 			return fail("proposal_changed", ErrApproval)
 		}
 	}
