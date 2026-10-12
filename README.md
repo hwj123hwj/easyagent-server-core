@@ -39,5 +39,6 @@ Chat 完成当前问题，Agent 主动关联多个只读查询形成结果。两
 1. [架构与接口 RFC](docs/RFC-001-SERVER-RUNTIME.md)：嵌入分层、宿主接口、执行与恢复合同。
 2. [威胁模型与权限边界](docs/THREAT-MODEL.md)：提示注入、权限校验和同进程边界。
 3. [验收与开源边界](docs/ACCEPTANCE.md)：虚构示例、回归和源码引入要求。
+4. [评审 001：受控操作能力的缺口](docs/REVIEW-001-OPERATION-CAPABILITY.md)：为何保留「无通用执行」，但需为具名受控业务操作留出协议位置。
 
 本仓库采用 [MIT License](LICENSE)，来源说明见 [NOTICE](NOTICE.md)。实现引入 EasyAgent 源码时保留来源 LICENSE、版权和文件映射。当前参考提交为 `d90804fbe5cf488e6ace810cff925f7cc8b8c6d9`，升级按文件审查。
