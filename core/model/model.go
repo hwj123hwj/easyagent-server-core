@@ -25,10 +25,13 @@ type ToolCall struct {
 }
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Text       string     `json:"text,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// ReasoningContent is opaque provider continuation state for this in-memory
+	// tool loop only. Never persist it or include it in user-visible logs/events.
+	ReasoningContent string     `json:"-"` // transient provider continuation only; never public/persisted
+	Role             Role       `json:"role"`
+	Text             string     `json:"text,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 type ToolDefinition struct {
@@ -55,9 +58,10 @@ const (
 )
 
 type Response struct {
-	Text         string
-	ToolCalls    []ToolCall
-	FinishReason FinishReason
+	ReasoningContent string `json:"-"`
+	Text             string
+	ToolCalls        []ToolCall
+	FinishReason     FinishReason
 }
 
 // Provider returns only a complete response. emit contains text increments,

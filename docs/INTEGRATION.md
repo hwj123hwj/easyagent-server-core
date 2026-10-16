@@ -129,3 +129,12 @@ go run ./examples/embedded -http -scenario query
 核心核对原操作者/租户/RunID、当前工具版本与闭合参数 schema、原操作指纹、当前资源版本及稳定 OperationID，并复用 Run 的逐次授权和 ApprovalGate。只开放明确 RequiresApproval 的 write 工具；权限撤销、参数/目标变化、超期批准和未知结果均停止，不重问模型生成另一项操作。pending 返回 PendingApproval，未知副作用仍返回 ErrUncertain。最终结果来自宿主 Execute 的正式状态。
 
 宿主仍负责在一个事务里消费批准、复用原业务接口执行、保存结果与审计，并保证重复确认不会重复执行。外部系统写入未知时保留 unknown，不能因网络重试重新 Run/Continue。该入口不内置 IM、存储、业务角色或通用执行工具。
+
+
+## 流式预算与私有 provider 连续状态
+
+可选 OpenAI-compatible provider 将 SSE 线协议预算（Config.MaxResponseBytes）与调用方解码后的回答/工具参数预算（Request.MaxResponseBytes）分开约束。密集小帧、usage 与私有连续字段不会挤占公开回答预算；公开增量在 emit 前逐段限额，完整回答及工具参数还需通过总输出预算。原始网络响应仍有独立上限，不能通过增加私有字段绕过内存限制。HTTP 错误仍只公开状态码，不传递响应正文；不增加第三方依赖。
+
+部分兼容服务要求下一轮工具请求回传 `reasoning_content`。model.Message/Response 的 ReasoningContent 是不透明、只在同一运行内使用的传输状态；provider 接收 reasoning_content/reasoning 后只回传给模型，不触发文本增量、进度或公开 JSON。Runner 的输入预算显式计入该字段，provider 还会限制实际请求体。宿主不得用 fmt 输出整个内存对象，也不要另行持久化该字段。普通跨会话历史使用 JSON 序列化的公开消息，不能从保存的历史恢复该私有状态。
+
+此变更不提供业务话术路由、会话数据库或自动执行。pending approval 仍由宿主保存原提案并发送用户确认；Continue 只执行固定的、重新鉴权和重新准备的原工具调用。业务权限、配置差异、飞书/其他渠道回调、事务和审计继续由宿主工具负责。
