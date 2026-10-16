@@ -64,6 +64,8 @@ const (
 )
 
 type Result struct {
+	// Code is a safe, machine-readable outcome category, never a raw host error.
+	Code       string `json:"code,omitempty"`
 	Status     Status `json:"status"`
 	EvidenceID string `json:"evidence_id,omitempty"`
 	Summary    string `json:"summary"`

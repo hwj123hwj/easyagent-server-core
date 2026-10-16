@@ -213,7 +213,7 @@ func (p *Provider) Generate(ctx context.Context, req model.Request, emit func(st
 		}
 		return nil
 	}
-	out, err := parseSSE(ctx, resp.Body, p.maxResponse, aliases, boundedEmit)
+	out, err := parseSSE(ctx, resp.Body, p.maxResponse, historyAliases, boundedEmit)
 	if err != nil {
 		return model.Response{}, err
 	}
@@ -366,16 +366,22 @@ func parseSSE(ctx context.Context, body io.Reader, max int, aliases map[string]s
 			return model.Response{}, ErrProtocol
 		}
 		ids[a.id] = true
-		name, exposed := aliases[a.name]
-		if !exposed {
-			return model.Response{}, ErrProtocol
+		name, known := aliases[a.name]
+		if !known {
+			// A valid but unavailable name is a tool-selection error, not a
+			// broken stream. Preserve known historical aliases for identity;
+			// the runner alone decides exposure and must never execute guesses.
+			if !validHistoricalToolName(a.name) {
+				return model.Response{}, ErrProtocol
+			}
+			name = a.name
 		}
 		response.ToolCalls = append(response.ToolCalls, model.ToolCall{ID: a.id, Name: name, Arguments: json.RawMessage(a.args.String())})
 	}
 	return response, nil
 }
 
-// Historical aliases are serialization only, never response-call authority.
+// Historical aliases preserve identity, never response-call authority.
 func validHistoricalToolName(name string) bool {
 	if len(name) == 0 || len(name) > 64 {
 		return false

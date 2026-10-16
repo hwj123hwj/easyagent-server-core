@@ -91,7 +91,7 @@ func TestEmployeeDirectoryDoesNotExposeManagementAndScopeCannotBeForged(t *testi
 	}{
 		{"own usage", "employee-demo", "member-a", "usage.daily", nil},
 		{"coworker", "employee-demo", "member-b", "usage.daily", runner.ErrDenied},
-		{"hidden management", "employee-demo", "member-a", "member.update", runner.ErrTool},
+		{"hidden management", "employee-demo", "member-a", "member.update", nil},
 		{"other department", "operator-demo", "member-b", "usage.daily", runner.ErrDenied},
 		{"unknown sender", "not-authenticated", "member-a", "usage.daily", runner.ErrDenied},
 		{"other tenant", "foreign-demo", "member-a", "usage.daily", runner.ErrDenied},

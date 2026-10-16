@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/hwj123hwj/easyagent-server-core/core/model"
+	"github.com/hwj123hwj/easyagent-server-core/core/runner"
+	"github.com/hwj123hwj/easyagent-server-core/core/tool"
 	"github.com/hwj123hwj/easyagent-server-core/providers/openai"
 )
 
@@ -296,8 +298,13 @@ func TestDeferredHistoricalToolsRemainHistoryOnly(t *testing.T) {
 				name = "invalid name"
 			}
 			r.Messages = append(r.Messages, model.Message{Role: model.Assistant, ToolCalls: []model.ToolCall{{ID: "previous", Name: name, Arguments: json.RawMessage(`{}`)}}}, model.Message{Role: model.Tool, ToolCallID: "previous", Text: "fictional usage result"}, model.Message{Role: model.User, Text: "continue"})
-			_, e = p.Generate(context.Background(), r, func(string) error { return nil })
-			if kind == "history" {
+			out, err := p.Generate(context.Background(), r, func(string) error { return nil })
+			e = err
+			if kind == "hidden response" {
+				if e != nil || len(out.ToolCalls) != 1 || out.ToolCalls[0].Name != "usage.daily" {
+					t.Fatalf("hidden call identity: %+v %v", out, e)
+				}
+			} else if kind == "history" {
 				if e != nil || calls.Load() != 1 {
 					t.Fatal(e)
 				}
@@ -308,5 +315,78 @@ func TestDeferredHistoricalToolsRemainHistoryOnly(t *testing.T) {
 				t.Fatal("invalid history reached network")
 			}
 		})
+	}
+}
+
+func TestUnknownSafeToolNameIsNotAProtocolFailure(t *testing.T) {
+	for _, name := range []string{"company_usage_ranking", "unsafe name"} {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": 0, "id": "guess", "type": "function", "function": map[string]string{"name": name, "arguments": "{}"}}}}, "finish_reason": "tool_calls"}}})
+			p := server(t, frame(string(raw))+frame("[DONE]"))
+			out, err := p.Generate(t.Context(), request(), func(string) error { return nil })
+			if name == "unsafe name" {
+				if !errors.Is(err, openai.ErrProtocol) {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err != nil || len(out.ToolCalls) != 1 || out.ToolCalls[0].Name != name {
+				t.Fatalf("response=%+v err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestSSEUnknownToolFeedbackThenActualAuthorizedRead(t *testing.T) {
+	turns, executed := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role, Content string
+				ToolCallID    string `json:"tool_call_id"`
+			}
+			Tools []struct{ Function struct{ Name string } }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "usage_daily" {
+			t.Error("guessed tool was exposed")
+		}
+		turns++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if turns == 1 {
+			fmt.Fprint(w, frame(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"guess","type":"function","function":{"name":"company_usage_ranking","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)+frame("[DONE]"))
+			return
+		}
+		last := body.Messages[len(body.Messages)-1]
+		if turns == 2 {
+			if last.Role != "tool" || last.ToolCallID != "guess" || !strings.Contains(last.Content, "tool_unavailable") {
+				t.Error("failure not fed back")
+			}
+			fmt.Fprint(w, frame(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"actual","type":"function","function":{"name":"usage_daily","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)+frame("[DONE]"))
+			return
+		}
+		if last.ToolCallID != "actual" || !strings.Contains(last.Content, "fictional usage") {
+			t.Error("missing actual result")
+		}
+		fmt.Fprint(w, frame(`{"choices":[{"index":0,"delta":{"content":"Checked available usage."},"finish_reason":"stop"}]}`)+frame("[DONE]"))
+	}))
+	defer srv.Close()
+	p, err := openai.New(openai.Config{Endpoint: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tt := tool.Tool{Spec: tool.Spec{Name: "usage.daily", Version: "1", Description: "fictional usage", Effect: tool.Read, Input: tool.Schema{Type: "object"}, Timeout: time.Second, MaxResultBytes: 1024}, Execute: func(context.Context, tool.ExecutionContext, tool.Call, tool.Progress) (tool.Result, error) {
+		executed++
+		return tool.Result{Status: tool.Available, Summary: "fictional usage"}, nil
+	}}
+	core, err := runner.New(runner.Definition{ID: "test", Version: "1", Model: "test", Tools: []tool.Tool{tt}}, runner.Dependencies{Provider: p, Authorizer: tool.AuthorizerFunc(func(context.Context, tool.ExecutionContext, tool.Call) error { return nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := core.Run(t.Context(), runner.Request{Principal: tool.Principal{TenantID: "test", SubjectID: "test"}, RunID: "sse-test", Question: "inspect"}, nil)
+	if err != nil || out.State != runner.Completed || turns != 3 || executed != 1 || out.ToolCalls != 2 {
+		t.Fatalf("state=%s err=%v turns=%d executed=%d tools=%d", out.State, err, turns, executed, out.ToolCalls)
 	}
 }

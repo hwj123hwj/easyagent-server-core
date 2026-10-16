@@ -90,8 +90,8 @@ func TestDiscoveryRejectsHiddenCallsAndSameBatchGuess(t *testing.T) {
 				discovery := proposed(runner.DiscoverTools, "discover", `{"groups":["business.people"]}`)
 				response.ToolCalls = append(discovery.ToolCalls, response.ToolCalls...)
 			}
-			out, e := build(t, d, deps(script(response))).Run(context.Background(), req(), nil)
-			if !errors.Is(e, runner.ErrTool) || calls != 0 || out.ToolCalls != 0 {
+			out, e := build(t, d, deps(script(response, model.Response{FinishReason: model.Stop, Text: "Unavailable capability; no query executed."}))).Run(context.Background(), req(), nil)
+			if e != nil || calls != 0 || out.State != runner.Completed || out.ToolCalls != len(response.ToolCalls) {
 				t.Fatalf("err=%v calls=%d tools=%d", e, calls, out.ToolCalls)
 			}
 		})
@@ -155,8 +155,8 @@ func TestDiscoveryRevocationBudgetAndUnknownGroup(t *testing.T) {
 				expected = runner.ErrBudget
 			}
 			if kind == "unknown group" {
-				p = script(proposed(runner.DiscoverTools, "d1", `{"groups":["forbidden"]}`))
-				expected = tool.ErrArguments
+				p = script(proposed(runner.DiscoverTools, "d1", `{"groups":["forbidden"]}`), model.Response{FinishReason: model.Stop, Text: "No authorized group."})
+				expected = nil
 			}
 			dep := deps(p)
 			checks := 0

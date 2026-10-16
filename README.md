@@ -85,3 +85,5 @@ go run ./examples/host-integration -scenario duplicate
 7. [评审 002：首版实现的合同收口](docs/REVIEW-002-IMPLEMENTATION-CLOSURE.md)：写操作影响核对与取消语义的修正记录。
 
 本仓库采用 [MIT License](LICENSE)，来源说明见 [NOTICE](NOTICE.md)。实现引入 EasyAgent 源码时保留来源 LICENSE、版权和文件映射。当前参考提交为 `d90804fbe5cf488e6ace810cff925f7cc8b8c6d9`，升级按文件审查。
+
+工具错误反馈：未知/未加载工具、参数不符和普通读失败作为结构化工具结果继续推理，共享既有步数、时间及重复调用预算；鉴权/审批边界及不确定写仍停止。详见[接入说明](docs/INTEGRATION.md#工具失败反馈与继续推理)。

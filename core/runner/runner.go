@@ -261,12 +261,40 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 			out.State = Completed
 			return out, nil
 		}
-		// Validate exposure for the entire batch before executing anything. A
-		// discovery call cannot authorize guessed tools in the same response.
+		// Validate call structure and exposure before any batch side effects.
+		// Unknown/unloaded tools are observations the model can correct; they
+		// never cause implicit registration, discovery or execution.
+		batchIDs := map[string]bool{}
+		unavailable := false
 		for _, proposed := range response.ToolCalls {
-			if !visible[proposed.Name] {
-				return fail("tool_not_exposed", ErrTool)
+			if !namePattern.MatchString(proposed.Name) || proposed.ID == "" || len(proposed.ID) > 128 || !utf8.ValidString(proposed.ID) || callIDs[proposed.ID] || batchIDs[proposed.ID] || !json.Valid(proposed.Arguments) {
+				return fail("unregistered_or_invalid_tool", ErrTool)
 			}
+			batchIDs[proposed.ID] = true
+			unavailable = unavailable || !visible[proposed.Name]
+		}
+		if unavailable {
+			for _, proposed := range response.ToolCalls {
+				if out.ToolCalls >= b.MaxToolCalls {
+					return fail("tool_budget", ErrBudget)
+				}
+				key := proposed.Name + ":" + string(proposed.Arguments)
+				seen[key]++
+				if seen[key] > b.MaxRepeatedReads {
+					return fail("repeated_tool", ErrLoop)
+				}
+				callIDs[proposed.ID] = true
+				out.ToolCalls++
+				result := tool.Result{Status: tool.Invalid, Code: "batch_not_executed", Summary: "No tools in this batch executed because it included an unavailable tool. Use the currently exposed schemas, or discover the required group first in a separate turn."}
+				if !visible[proposed.Name] {
+					result.Code = "tool_unavailable"
+					result.Summary = "This tool is not available in the current tool set. Do not guess names. Use the currently exposed schemas or discover an authorized group first; if no capability exists, explain the limitation. Nothing executed."
+				}
+				if err := recordToolResult(&out, proposed, result, &outputBytes, b.MaxOutputBytes, emit); err != nil {
+					return out, err
+				}
+			}
+			continue
 		}
 		for _, proposed := range response.ToolCalls {
 			if err := ctx.Err(); err != nil {
@@ -288,7 +316,17 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 			}
 			args, err := t.Spec.Input.Normalize(proposed.Arguments)
 			if err != nil {
-				return fail("invalid_arguments", err)
+				out.ToolCalls++
+				key := proposed.Name + ":" + string(proposed.Arguments)
+				seen[key]++
+				if seen[key] > b.MaxRepeatedReads {
+					return fail("repeated_tool", ErrLoop)
+				}
+				result := tool.Result{Status: tool.Invalid, Code: "invalid_arguments", Summary: "Arguments do not match this tool's exposed schema. Correct the required fields, types and allowed values; unknown or duplicate fields are rejected. Nothing executed."}
+				if err := recordToolResult(&out, proposed, result, &outputBytes, b.MaxOutputBytes, emit); err != nil {
+					return out, err
+				}
+				continue
 			}
 			c := tool.Call{Name: t.Spec.Name, Version: t.Spec.Version, Arguments: args}
 			key := c.Name + "@" + c.Version + ":" + string(args)
@@ -321,6 +359,22 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 		}
 	}
 	return fail("model_budget", ErrBudget)
+}
+
+// recordToolResult closes a rejected call without invoking host callbacks. It
+// shares the normal output budget and persists a public diagnostic observation.
+func recordToolResult(out *Outcome, c model.ToolCall, result tool.Result, used *int, limit int, emit func(event.Event) error) error {
+	encoded, err := json.Marshal(result)
+	if err != nil || *used+len(encoded) > limit {
+		return &Failure{Code: "output_budget", Cause: ErrBudget}
+	}
+	*used += len(encoded)
+	out.Observations = append(out.Observations, Observation{CallID: c.ID, Tool: c.Name, Result: result})
+	if err := emit(event.Event{Kind: event.ToolEnd, Tool: c.Name, CallID: c.ID, Status: result.Status, Code: result.Code}); err != nil {
+		return err
+	}
+	out.History = append(out.History, model.Message{Role: model.Tool, ToolCallID: c.ID, Text: string(encoded)})
+	return nil
 }
 
 func fingerprint(ec tool.ExecutionContext, c tool.Call, intent tool.Intent) string {
@@ -430,11 +484,11 @@ func (r *Runner) execute(ctx context.Context, ec tool.ExecutionContext, c tool.C
 		if t.Spec.Effect == tool.Write {
 			result = tool.Result{Status: tool.Unknown, Summary: "Operation outcome is unconfirmed; query the host operation record before continuing."}
 		} else {
-			result = tool.Result{Status: tool.Unavailable, Summary: "Source unavailable or result invalid."}
+			result = tool.Result{Status: tool.Unavailable, Code: "tool_execution_failed", Summary: "Read failed, timed out, or returned an invalid result. No usable evidence was obtained. Correct the query, consult another authorized source, or explain the missing evidence; do not invent a result."}
 		}
 	}
 	out.Observations = append(out.Observations, Observation{CallID: ec.CallID, Tool: c.Name, OperationID: ec.OperationID, Result: result})
-	if endErr := emit(event.Event{Kind: event.ToolEnd, Tool: c.Name, CallID: ec.CallID, Status: result.Status}); endErr != nil {
+	if endErr := emit(event.Event{Kind: event.ToolEnd, Tool: c.Name, CallID: ec.CallID, Status: result.Status, Code: result.Code}); endErr != nil {
 		return fail("event_failed", endErr)
 	}
 	if result.Status == tool.Unknown || result.Status == tool.Partial {
@@ -443,12 +497,9 @@ func (r *Runner) execute(ctx context.Context, ec tool.ExecutionContext, c tool.C
 	if progressErr != nil {
 		return fail("progress_stopped", progressErr)
 	}
-	if err := ctx.Err(); err != nil {
-		return fail("tool_timed_out", err)
-	}
-	if invalid {
-		return fail("invalid_tool_result", ErrTool)
-	}
+	// Read failures (including a tool-local deadline) are observations. The
+	// outer loop still enforces the run/parent deadline before any next call.
+	// Unknown writes, progress failures and authorization remain terminal.
 	return result, nil, nil
 }
 
