@@ -27,3 +27,4 @@ jobs:
       - run: go test -race ./...
       - run: go run ./examples/embedded -scenario diagnostics
       - run: go run ./examples/embedded -scenario duplicate
+      - run: go run ./examples/host-integration -scenario duplicate

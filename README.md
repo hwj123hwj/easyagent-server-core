@@ -19,6 +19,7 @@ go run ./examples/embedded -scenario pending
 go run ./examples/embedded -scenario approved
 go run ./examples/embedded -scenario duplicate
 go run ./examples/discovery
+go run ./examples/host-integration -scenario duplicate
 ```
 
 示例输出分段回答、查询进度和执行状态；pending 不执行，duplicate 显式提交同一虚构意图两次但只产生一次副作用。另有 history、denied、unknown、partial 场景。模拟审批与内存去重只用于演示；真实权限、批准记录和业务去重由宿主落实。
@@ -30,6 +31,8 @@ go run ./examples/discovery
 消息接入可先使用 `core/command` 识别常用 slash 控制命令，再由宿主落实权限、会话和取消；见 [控制命令集成](docs/INTEGRATION.md#7-宿主控制命令)。
 
 可选 `Definition.Discovery` 将宿主已注册的具名工具按能力分组，模型先发现再加载下一轮所需 schema。同一对话可跨领域查询；权限与审批保持独立。见[按需工具披露](docs/INTEGRATION.md#按需工具披露)及[离线示例](examples/discovery/main.go)。
+
+匿名实战接入案例见 [examples/host-integration](examples/host-integration/README.md)：以虚构企业用量和成员权限展示业务/管理同会话、新鲜读取、固定提案确认、权限/会话变化拒绝、幂等与未知结果保护。附可运行宿主代码和回归，并明确哪些持久化/通道/多实例能力需要真实应用补齐。
 
 ## 最小核心
 
