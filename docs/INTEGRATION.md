@@ -121,3 +121,11 @@ go run ./examples/embedded -http -scenario query
 宿主先校验真实身份和当前权限，再分派控制命令；保持输入去重和最终回复的独立去重。控制命令不应排在正在处理的普通问题之后。`new/reset` 必须持久切换会话代次，隔离旧历史并阻止旧执行的迟到结果写入新会话；`stop/cancel` 仅停止当前账户/通道会话的 AI 运行，不停止被诊断的业务任务。状态/帮助不应依赖模型在线。多 Pod、事务、租约 fencing、取消事件和来源权限仍归宿主，解析到命令不等于已执行成功。
 
 消息通道的临时“处理中”反馈应覆盖正常完成、失败、取消和断线恢复的收尾；错误的反馈不能阻塞回答。删除自己已知的临时反馈与重复发送正文是不同操作：前者可核对目标后幂等收尾，后者仍须保留不确定状态、禁止盲重发。核心不绑定飞书等 IM SDK。设计参考本地 EasyCodeClient 的控制优先通道及 gateway 的 finally 收尾行为；未复制其编码执行工具或 TypeScript 实现。
+
+## 8. 确认后执行固定操作
+
+`Runner.Continue(ctx, runner.Continuation{Principal, RunID, Proposal}, handle)` 不调用模型，也不重放历史。宿主必须从自己的持久化台账加载原 `Proposal`，验证确认消息或回调的真实身份、通道、会话代次和有效期，然后才调用此入口；不能接收客户端任意 Proposal、布尔 confirmed 或模型自称批准。
+
+核心核对原操作者/租户/RunID、当前工具版本与闭合参数 schema、原操作指纹、当前资源版本及稳定 OperationID，并复用 Run 的逐次授权和 ApprovalGate。只开放明确 RequiresApproval 的 write 工具；权限撤销、参数/目标变化、超期批准和未知结果均停止，不重问模型生成另一项操作。pending 返回 PendingApproval，未知副作用仍返回 ErrUncertain。最终结果来自宿主 Execute 的正式状态。
+
+宿主仍负责在一个事务里消费批准、复用原业务接口执行、保存结果与审计，并保证重复确认不会重复执行。外部系统写入未知时保留 unknown，不能因网络重试重新 Run/Continue。该入口不内置 IM、存储、业务角色或通用执行工具。
