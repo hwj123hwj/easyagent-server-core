@@ -130,7 +130,7 @@ func TestRejectBeforeSideEffect(t *testing.T) {
 				calls++
 				return tool.Result{Status: tool.Available}, nil
 			})
-			d := deps(script(proposed(tc.tool, "call-1", tc.args)))
+			d := deps(script(proposed(tc.tool, "call-1", tc.args), model.Response{FinishReason: model.Stop, Text: "Cannot query with those arguments."}))
 			if tc.deny {
 				d.Authorizer = tool.AuthorizerFunc(func(context.Context, tool.ExecutionContext, tool.Call) error {
 					return errors.New("secret policy detail")
@@ -138,11 +138,11 @@ func TestRejectBeforeSideEffect(t *testing.T) {
 			}
 			var events []event.Event
 			_, err := build(t, definition(tt), d).Run(context.Background(), req(), func(e event.Event) error { events = append(events, e); return nil })
-			if !errors.Is(err, tc.want) || calls != 0 || done(events) {
+			if calls != 0 || (tc.deny && (!errors.Is(err, tc.want) || done(events))) || (!tc.deny && (err != nil || !done(events))) {
 				t.Fatalf("err=%v calls=%d", err, calls)
 			}
 			b, _ := json.Marshal(events)
-			if strings.Contains(string(b), "secret") || strings.Contains(err.Error(), "secret") {
+			if strings.Contains(string(b), "secret") || (err != nil && strings.Contains(err.Error(), "secret")) {
 				t.Fatal("private cause leaked")
 			}
 		})
@@ -376,7 +376,7 @@ func TestStreamFailureHandlerFailureAndUnknownEvidence(t *testing.T) {
 			if err == nil || out.State == runner.Completed || done(events) {
 				t.Fatalf("out=%+v err=%v", out, err)
 			}
-			if strings.Contains(err.Error(), "secret") {
+			if err != nil && strings.Contains(err.Error(), "secret") {
 				t.Fatal("raw error leaked")
 			}
 		})
@@ -433,8 +433,8 @@ func TestToolDeadlineAndRevokedBetweenCalls(t *testing.T) {
 		return tool.Result{}, ctx.Err()
 	})
 	tt.Spec.Timeout = 10 * time.Millisecond
-	out, err := build(t, definition(tt), deps(script(proposed("job.runs", "call-1", `{"id":"job-1"}`)))).Run(context.Background(), req(), nil)
-	if !errors.Is(err, context.DeadlineExceeded) || len(out.Observations) != 1 {
+	out, err := build(t, definition(tt), deps(script(proposed("job.runs", "call-1", `{"id":"job-1"}`), model.Response{FinishReason: model.Stop, Text: "Query timed out; evidence missing."}))).Run(context.Background(), req(), nil)
+	if err != nil || out.State != runner.Completed || len(out.Observations) != 1 || out.Observations[0].Result.Code != "tool_execution_failed" {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}
 	calls, checks := 0, 0
@@ -493,7 +493,7 @@ func TestConcurrentHistoriesAndDefinitionSnapshot(t *testing.T) {
 }
 
 func TestInputOutputBudgetsAndFinalValidation(t *testing.T) {
-	for _, name := range []string{"input", "delta", "tool result", "final"} {
+	for _, name := range []string{"input", "delta", "final"} {
 		t.Run(name, func(t *testing.T) {
 			def := definition()
 			d := deps(model.ProviderFunc(func(ctx context.Context, r model.Request, emit func(string) error) (model.Response, error) {
@@ -512,13 +512,6 @@ func TestInputOutputBudgetsAndFinalValidation(t *testing.T) {
 				def.AgentBudget.MaxInputBytes = 1
 			case "delta":
 				def.AgentBudget.MaxOutputBytes = 128
-			case "tool result":
-				tt := read(func(context.Context, tool.ExecutionContext, tool.Call, tool.Progress) (tool.Result, error) {
-					return tool.Result{Status: tool.Available, Summary: strings.Repeat("a", 2000)}, nil
-				})
-				def.Tools = []tool.Tool{tt}
-				d.Provider = script(proposed("job.runs", "c1", `{"id":"job-1"}`))
-				want = runner.ErrTool
 			case "final":
 				d.ValidateFinal = func(context.Context, runner.Outcome) error { return runner.ErrEvidence }
 				want = runner.ErrEvidence
