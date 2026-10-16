@@ -2,7 +2,7 @@
 
 面向企业应用的可嵌入 Go Agent 核心：有界模型循环、具名受控工具、逐次授权和流式事件。
 
-**状态：首版开发预览，核心与离线示例已可运行。** 仓库：[hwj123hwj/easyagent-server-core](https://github.com/hwj123hwj/easyagent-server-core)。所有示例为虚构数据；尚未接入生产 Router、业务来源或持久后台任务。
+**状态：开发预览，核心、固定提案确认执行、会话控制命令与离线示例已实现。** 仓库：[hwj123hwj/easyagent-server-core](https://github.com/hwj123hwj/easyagent-server-core)。所有示例为虚构数据；生产模型、业务来源、身份映射与持久后台任务由宿主集成并独立验收。
 
 项目从 [EasyAgent](https://github.com/hwj123hwj/easyagent) 提取必要协议并改造，在宿主应用进程中运行。服务端专用指工具与权限的执行边界，不要求独立部署 Agent 服务。
 
@@ -61,6 +61,8 @@ go run ./examples/embedded -scenario duplicate
 | 单次执行入口 | 按需使用 PG/Redis、既有 worker 和多 Pod 协调 |
 
 核心接受宿主传入的可信身份与历史消息，不内置会话数据库、任务队列、outbox、租约或 Workflow 引擎。Chat 完成当前问题，Agent 允许更主动的多步工具调用；两者共用执行器，模式不授予额外权限，也不必进入后台任务。
+
+面向不同用户时，宿主先认证并解析既有授权，再选择该用户可用的工具，调用时用 `Authorizer` 重新核验身份、能力和资源范围。普通用户、部门范围用户和配置管理员可以使用同一核心；角色、组织和具体能力命名由宿主维护，人工确认不增加权限。见[身份与工具权限接入](docs/INTEGRATION.md#身份与工具权限接入)。
 
 首选源码引入：复制约定的纯核心目录，调整 import，保留 LICENSE/NOTICE，记录来源 tag/SHA 与本地改动。没有 daemon、强制 RPC、新增 Pod 或 PG/Redis 安装要求。标准 Go module 导入也可选择；不依赖 EasyAgent 完整 SDK 或 Eino。宿主已有 Router HTTP 客户端可以直接适配 Provider。
 
