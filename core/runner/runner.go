@@ -5,8 +5,6 @@ package runner
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -307,16 +305,7 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 }
 
 func fingerprint(ec tool.ExecutionContext, c tool.Call, intent tool.Intent) string {
-	b, _ := json.Marshal(struct {
-		Principal        tool.Principal
-		AssistantID      string
-		AssistantVersion string
-		OperationID      string
-		Call             tool.Call
-		Intent           tool.Intent
-	}{ec.Principal, ec.AssistantID, ec.AssistantVersion, ec.OperationID, c, intent})
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
+	return tool.ProposalFingerprint(ec, c, intent)
 }
 
 func copyCall(c tool.Call) tool.Call {
