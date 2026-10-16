@@ -24,6 +24,8 @@ go run ./examples/embedded -scenario duplicate
 
 源码：[模型协议](core/model/model.go)、[工具合同](core/tool/tool.go)、[执行器](core/runner/types.go)、[事件](core/event/event.go)、[可选 HTTP provider](providers/openai/openai.go)。接入入口是 runner.New + Runner.Run；详见 [接入说明](docs/INTEGRATION.md)。
 
+消息接入可先使用 `core/command` 识别常用 slash 控制命令，再由宿主落实权限、会话和取消；见 [控制命令集成](docs/INTEGRATION.md#7-宿主控制命令)。
+
 ## 最小核心
 
 1. 消息、模型协议和固定配置的 HTTP/流式调用。
