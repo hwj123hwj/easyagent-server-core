@@ -197,3 +197,47 @@ func TestRejectUntrustedEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestWireAndDecodedBudgetsAreIndependent(t *testing.T) {
+	// Router may emit reasoning and one-character content frames. Their JSON
+	// envelope must not consume the caller's decoded answer budget.
+	body := frame(`{"choices":[{"index":0,"delta":{"reasoning_content":"` + strings.Repeat("private reasoning ", 500) + `"}}]}`)
+	for range 200 {
+		body += frame(`{"choices":[{"index":0,"delta":{"content":"字"}}]}`)
+	}
+	body += frame(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) + frame("[DONE]")
+	r := request()
+	r.MaxResponseBytes = 2048
+	var preview strings.Builder
+	out, err := server(t, body).Generate(context.Background(), r, func(s string) error { preview.WriteString(s); return nil })
+	if err != nil || out.Text != strings.Repeat("字", 200) || preview.String() != out.Text {
+		t.Fatalf("framing consumed answer budget: bytes=%d err=%v", len(out.Text), err)
+	}
+	r.MaxResponseBytes = 100
+	preview.Reset()
+	_, err = server(t, body).Generate(context.Background(), r, func(s string) error { preview.WriteString(s); return nil })
+	if !errors.Is(err, openai.ErrLimit) || preview.Len() > r.MaxResponseBytes {
+		t.Fatalf("decoded streaming budget ignored: bytes=%d err=%v", preview.Len(), err)
+	}
+}
+
+func TestWireBudgetAndToolArgumentsRemainBounded(t *testing.T) {
+	body := frame(`{"choices":[{"index":0,"delta":{"reasoning_content":"`+strings.Repeat("x", 2000)+`"}}]}`) +
+		frame(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) + frame("[DONE]")
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) }))
+	defer s.Close()
+	p, err := openai.New(openai.Config{Endpoint: s.URL, MaxResponseBytes: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Generate(context.Background(), request(), nil); !errors.Is(err, openai.ErrLimit) {
+		t.Fatalf("wire limit ignored: %v", err)
+	}
+	body = frame(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"runs","arguments":"{\"id\":\"`+strings.Repeat("x", 500)+`\"}"}}]},"finish_reason":"tool_calls"}]}`) + frame("[DONE]")
+	r := request()
+	r.MaxResponseBytes = 100
+	r.Tools = []model.ToolDefinition{{Name: "runs", Version: "1", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	if _, err = server(t, body).Generate(context.Background(), r, nil); !errors.Is(err, openai.ErrLimit) {
+		t.Fatalf("tool argument budget ignored: %v", err)
+	}
+}

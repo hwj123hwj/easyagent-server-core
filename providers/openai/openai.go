@@ -96,10 +96,11 @@ type function struct {
 	Arguments string `json:"arguments"`
 }
 type wireMessage struct {
-	Role    string         `json:"role"`
-	Content string         `json:"content"`
-	Calls   []functionCall `json:"tool_calls,omitempty"`
-	CallID  string         `json:"tool_call_id,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content"`
+	Calls            []functionCall `json:"tool_calls,omitempty"`
+	CallID           string         `json:"tool_call_id,omitempty"`
 }
 type wireTool struct {
 	Type     string         `json:"type"`
@@ -143,7 +144,7 @@ func (p *Provider) Generate(ctx context.Context, req model.Request, emit func(st
 		if m.Role != model.User && m.Role != model.Assistant && m.Role != model.Tool {
 			return model.Response{}, ErrProtocol
 		}
-		w := wireMessage{Role: string(m.Role), Content: m.Text, CallID: m.ToolCallID}
+		w := wireMessage{Role: string(m.Role), Content: m.Text, CallID: m.ToolCallID, ReasoningContent: m.ReasoningContent}
 		for _, c := range m.ToolCalls {
 			name, ok := names[c.Name]
 			if !ok {
@@ -184,11 +185,29 @@ func (p *Provider) Generate(ctx context.Context, req model.Request, emit func(st
 	if resp.StatusCode != http.StatusOK {
 		return model.Response{}, &HTTPError{StatusCode: resp.StatusCode}
 	}
-	maxBytes := p.maxResponse
-	if req.MaxResponseBytes > 0 && req.MaxResponseBytes < maxBytes {
-		maxBytes = req.MaxResponseBytes
+	decodedBytes := p.maxResponse
+	if req.MaxResponseBytes > 0 {
+		decodedBytes = req.MaxResponseBytes
 	}
-	return parseSSE(ctx, resp.Body, maxBytes, aliases, emit)
+	boundedEmit := func(delta string) error {
+		decodedBytes -= len(delta)
+		if decodedBytes < 0 {
+			return ErrLimit
+		}
+		if emit != nil {
+			return emit(delta)
+		}
+		return nil
+	}
+	out, err := parseSSE(ctx, resp.Body, p.maxResponse, aliases, boundedEmit)
+	if err != nil {
+		return model.Response{}, err
+	}
+	raw, err := json.Marshal(out)
+	if err != nil || (req.MaxResponseBytes > 0 && len(raw) > req.MaxResponseBytes) {
+		return model.Response{}, ErrLimit
+	}
+	return out, nil
 }
 
 type chunk struct {
@@ -201,8 +220,10 @@ type choice struct {
 	Delta        delta   `json:"delta"`
 }
 type delta struct {
-	Content string      `json:"content"`
-	Tools   []toolDelta `json:"tool_calls"`
+	ReasoningContent string      `json:"reasoning_content"`
+	Reasoning        string      `json:"reasoning"`
+	Content          string      `json:"content"`
+	Tools            []toolDelta `json:"tool_calls"`
 }
 type toolDelta struct {
 	Index    int      `json:"index"`
@@ -219,7 +240,7 @@ func parseSSE(ctx context.Context, body io.Reader, max int, aliases map[string]s
 	limited := &io.LimitedReader{R: body, N: int64(max) + 1}
 	scanner := bufio.NewScanner(limited)
 	scanner.Buffer(make([]byte, min(4096, max)), max+1)
-	var text strings.Builder
+	var text, reasoning strings.Builder
 	var data []string
 	calls := map[int]*accumulated{}
 	reason := ""
@@ -251,6 +272,8 @@ func parseSSE(ctx context.Context, body io.Reader, max int, aliases map[string]s
 			return ErrProtocol
 		}
 		ch := c.Choices[0]
+		reasoning.WriteString(ch.Delta.ReasoningContent)
+		reasoning.WriteString(ch.Delta.Reasoning)
 		if ch.Delta.Content != "" {
 			text.WriteString(ch.Delta.Content)
 			if emit != nil {
@@ -316,7 +339,7 @@ func parseSSE(ctx context.Context, body io.Reader, max int, aliases map[string]s
 	if !done || (reason == string(model.ToolUse)) != (len(calls) > 0) {
 		return model.Response{}, ErrProtocol
 	}
-	response := model.Response{Text: text.String(), FinishReason: model.FinishReason(reason)}
+	response := model.Response{Text: text.String(), ReasoningContent: reasoning.String(), FinishReason: model.FinishReason(reason)}
 	indices := make([]int, 0, len(calls))
 	for index := range calls {
 		indices = append(indices, index)

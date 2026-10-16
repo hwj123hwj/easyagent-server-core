@@ -166,7 +166,11 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 			mr.Tools[i].Parameters = append(json.RawMessage(nil), mr.Tools[i].Parameters...)
 		}
 		encoded, err := json.Marshal(mr)
-		if err != nil || len(encoded) > b.MaxInputBytes || mr.MaxResponseBytes <= 0 {
+		inputBytes := len(encoded)
+		for _, m := range mr.Messages {
+			inputBytes += len(m.ReasoningContent)
+		}
+		if err != nil || inputBytes > b.MaxInputBytes || mr.MaxResponseBytes <= 0 {
 			return fail("input_or_output_budget", ErrBudget)
 		}
 		out.ModelCalls++
@@ -224,7 +228,7 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 				return out, err
 			}
 		}
-		out.History = append(out.History, cloneMessages([]model.Message{{Role: model.Assistant, Text: response.Text, ToolCalls: response.ToolCalls}})[0])
+		out.History = append(out.History, cloneMessages([]model.Message{{Role: model.Assistant, Text: response.Text, ReasoningContent: response.ReasoningContent, ToolCalls: response.ToolCalls}})[0])
 		if len(response.ToolCalls) == 0 {
 			if strings.TrimSpace(response.Text) == "" {
 				return fail("empty_model_response", ErrModel)
