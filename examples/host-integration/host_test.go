@@ -271,3 +271,27 @@ func TestConcurrentConfirmationsApplyOneBusinessTransaction(t *testing.T) {
 		t.Fatal("duplicate side effect")
 	}
 }
+
+func TestPublicHistoryPreservesExactBusinessNumbers(t *testing.T) {
+	result := jsonResult(struct {
+		Tokens   int64  `json:"tokens"`
+		Cost     int64  `json:"cost_minor_units"`
+		Currency string `json:"currency"`
+	}{9007199254740993, 18, "USD"})
+	raw, e := json.Marshal(result)
+	if e != nil {
+		t.Fatal(e)
+	}
+	history := publicHistory([]model.Message{
+		{Role: model.User, Text: "Read fictional usage."},
+		{Role: model.Assistant, ReasoningContent: "opaque private continuation", ToolCalls: []model.ToolCall{{ID: "number-read", Name: "usage.daily", Arguments: []byte(`{"member_id":"member-a"}`)}}},
+		{Role: model.Tool, ToolCallID: "number-read", Text: string(raw)},
+	})
+	if len(history) != 3 || history[1].ReasoningContent != "" || history[2].Text != string(raw) {
+		t.Fatal("stored history altered business facts or retained private state")
+	}
+	saved := publicOutcome(runner.Outcome{History: history, Observations: []runner.Observation{{Result: result}}})
+	if len(saved.Observations) != 1 || saved.Observations[0].Result.Summary != result.Summary || !strings.Contains(result.Summary, "9007199254740993") {
+		t.Fatal("outcome serialization lost exact accounting values")
+	}
+}
