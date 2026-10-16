@@ -140,6 +140,10 @@ func (p *Provider) Generate(ctx context.Context, req model.Request, emit func(st
 		names[t.Name] = alias
 		wire.Tools = append(wire.Tools, wireTool{Type: "function", Function: wireDefinition{Name: alias, Description: t.Description, Parameters: t.Parameters}})
 	}
+	historyAliases := make(map[string]string, len(aliases))
+	for alias, name := range aliases {
+		historyAliases[alias] = name
+	}
 	for _, m := range req.Messages {
 		if m.Role != model.User && m.Role != model.Assistant && m.Role != model.Tool {
 			return model.Response{}, ErrProtocol
@@ -148,8 +152,18 @@ func (p *Provider) Generate(ctx context.Context, req model.Request, emit func(st
 		for _, c := range m.ToolCalls {
 			name, ok := names[c.Name]
 			if !ok {
+				// A previously used tool may now be deferred. Preserve its
+				// public call/result history without re-exposing its schema
+				// or accepting new calls to it in this response.
+				if !validHistoricalToolName(c.Name) {
+					return model.Response{}, ErrProtocol
+				}
+				name = strings.ReplaceAll(c.Name, ".", "_")
+			}
+			if previous, exists := historyAliases[name]; exists && previous != c.Name {
 				return model.Response{}, ErrProtocol
 			}
+			historyAliases[name] = c.Name
 			w.Calls = append(w.Calls, functionCall{ID: c.ID, Type: "function", Function: function{Name: name, Arguments: string(c.Arguments)}})
 		}
 		wire.Messages = append(wire.Messages, w)
@@ -352,11 +366,25 @@ func parseSSE(ctx context.Context, body io.Reader, max int, aliases map[string]s
 			return model.Response{}, ErrProtocol
 		}
 		ids[a.id] = true
-		name := a.name
-		if actual, ok := aliases[name]; ok {
-			name = actual
+		name, exposed := aliases[a.name]
+		if !exposed {
+			return model.Response{}, ErrProtocol
 		}
 		response.ToolCalls = append(response.ToolCalls, model.ToolCall{ID: a.id, Name: name, Arguments: json.RawMessage(a.args.String())})
 	}
 	return response, nil
+}
+
+// Historical aliases are serialization only, never response-call authority.
+func validHistoricalToolName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for i, c := range name {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && (c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }

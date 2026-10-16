@@ -52,6 +52,7 @@ type Definition struct {
 	AgentInstructions string
 	Model             string
 	Tools             []tool.Tool
+	Discovery         *Discovery
 	ChatBudget        Budget
 	AgentBudget       Budget
 }
