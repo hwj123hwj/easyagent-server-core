@@ -45,6 +45,9 @@ func newRunner(d Definition, deps Dependencies) (*Runner, error) {
 	if !validBudget(d.ChatBudget) || !validBudget(d.AgentBudget) || (len(d.Tools) > 0 && deps.Authorizer == nil) {
 		return nil, ErrConfiguration
 	}
+	if err := prepareDiscovery(&d); err != nil {
+		return nil, err
+	}
 	registered := make(map[string]tool.Tool, len(d.Tools))
 	copied := make([]tool.Tool, 0, len(d.Tools))
 	for _, t := range d.Tools {
@@ -147,10 +150,7 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 		}
 		evidence[id] = true
 	}
-	definitions := make([]model.ToolDefinition, 0, len(r.definition.Tools))
-	for _, t := range r.definition.Tools {
-		definitions = append(definitions, model.ToolDefinition{Name: t.Spec.Name, Version: t.Spec.Version, Description: t.Spec.Description, Parameters: t.Spec.Input.JSON()})
-	}
+	exposure := r.exposure()
 	seen := map[string]int{}
 	callIDs := map[string]bool{}
 	operationIDs := map[string]bool{}
@@ -158,6 +158,11 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 	for turn = 1; turn <= b.MaxModelCalls; turn++ {
 		if err := ctx.Err(); err != nil {
 			return fail("cancelled_or_timed_out", err)
+		}
+		definitions := exposure.definitions(r.definition.Tools)
+		visible := map[string]bool{}
+		for _, d := range definitions {
+			visible[d.Name] = true
 		}
 		mr := model.Request{Model: r.definition.Model, System: system, Messages: cloneMessages(out.History), Tools: definitions, MaxOutputTokens: b.MaxOutputTokens, MaxResponseBytes: b.MaxOutputBytes - outputBytes}
 		// A fresh schema copy prevents a provider from mutating the next turn.
@@ -256,6 +261,13 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 			out.State = Completed
 			return out, nil
 		}
+		// Validate exposure for the entire batch before executing anything. A
+		// discovery call cannot authorize guessed tools in the same response.
+		for _, proposed := range response.ToolCalls {
+			if !visible[proposed.Name] {
+				return fail("tool_not_exposed", ErrTool)
+			}
+		}
 		for _, proposed := range response.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				return fail("cancelled_or_timed_out", err)
@@ -263,6 +275,9 @@ func (r *Runner) run(parent context.Context, req Request, handle event.Handler) 
 			t, ok := r.tools[proposed.Name]
 			if !ok || proposed.ID == "" || len(proposed.ID) > 128 || !utf8.ValidString(proposed.ID) || callIDs[proposed.ID] {
 				return fail("unregistered_or_invalid_tool", ErrTool)
+			}
+			if r.definition.Discovery != nil && proposed.Name == DiscoverTools {
+				t.Execute = exposure.load
 			}
 			callIDs[proposed.ID] = true
 			if out.ToolCalls >= b.MaxToolCalls || (t.Spec.Effect == tool.Write && out.Writes >= b.MaxWrites) {

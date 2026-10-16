@@ -2,7 +2,7 @@
 
 面向企业应用的可嵌入 Go Agent 核心：有界模型循环、具名受控工具、逐次授权和流式事件。
 
-**状态：开发预览，核心、固定提案确认执行、会话控制命令与离线示例已实现。** 仓库：[hwj123hwj/easyagent-server-core](https://github.com/hwj123hwj/easyagent-server-core)。所有示例为虚构数据；生产模型、业务来源、身份映射与持久后台任务由宿主集成并独立验收。
+**状态：开发预览，核心、固定提案确认执行、会话控制命令、按需工具披露与离线示例已实现。** 仓库：[hwj123hwj/easyagent-server-core](https://github.com/hwj123hwj/easyagent-server-core)。所有示例为虚构数据；生产模型、业务来源、身份映射与持久后台任务由宿主集成并独立验收。
 
 项目从 [EasyAgent](https://github.com/hwj123hwj/easyagent) 提取必要协议并改造，在宿主应用进程中运行。服务端专用指工具与权限的执行边界，不要求独立部署 Agent 服务。
 
@@ -18,6 +18,7 @@ go run ./examples/embedded -scenario diagnostics
 go run ./examples/embedded -scenario pending
 go run ./examples/embedded -scenario approved
 go run ./examples/embedded -scenario duplicate
+go run ./examples/discovery
 ```
 
 示例输出分段回答、查询进度和执行状态；pending 不执行，duplicate 显式提交同一虚构意图两次但只产生一次副作用。另有 history、denied、unknown、partial 场景。模拟审批与内存去重只用于演示；真实权限、批准记录和业务去重由宿主落实。
@@ -28,6 +29,8 @@ go run ./examples/embedded -scenario duplicate
 
 消息接入可先使用 `core/command` 识别常用 slash 控制命令，再由宿主落实权限、会话和取消；见 [控制命令集成](docs/INTEGRATION.md#7-宿主控制命令)。
 
+可选 `Definition.Discovery` 将宿主已注册的具名工具按能力分组，模型先发现再加载下一轮所需 schema。同一对话可跨领域查询；权限与审批保持独立。见[按需工具披露](docs/INTEGRATION.md#按需工具披露)及[离线示例](examples/discovery/main.go)。
+
 ## 最小核心
 
 1. 消息、模型协议和固定配置的 HTTP/流式调用。
@@ -36,7 +39,7 @@ go run ./examples/embedded -scenario duplicate
 4. 每次工具调用的权限检查，以及可选的人工审批接口。
 5. 回复增量、查询进度、完成、待批准和错误事件。
 
-模型提出工具调用；代码决定是否允许并执行。核心不提供 shell、SSH、kubectl、任意脚本或代码执行、文件编辑、原始 SQL、任意 URL 请求、动态工具加载、Goal 或 Workflow。
+模型提出工具调用；代码决定是否允许并执行。核心不提供 shell、SSH、kubectl、任意脚本或代码执行、文件编辑、原始 SQL、任意 URL 请求、外部工具代码加载、Goal 或 Workflow。
 
 工具可以是读取，也可以是宿主明确开放的单一业务操作。例如 `job.runs(job_id)` 查询记录，`job.retry(job_id)` 请求重跑一个任务。后者必须有资源范围、真实业务权限和操作结果合同；不能用一个接收命令字符串的回调包装成“受控工具”。
 

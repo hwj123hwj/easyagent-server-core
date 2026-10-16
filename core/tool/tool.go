@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // Package tool defines explicitly registered host callbacks. It has no built-in
-// execution tools, database connections or dynamic loading facility.
+// execution tools, database connections or external code loading facility.
 package tool
 
 import (

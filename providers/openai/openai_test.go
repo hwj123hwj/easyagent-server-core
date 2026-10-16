@@ -241,3 +241,72 @@ func TestWireBudgetAndToolArgumentsRemainBounded(t *testing.T) {
 		t.Fatalf("tool argument budget ignored: %v", err)
 	}
 }
+
+func TestDeferredHistoricalToolsRemainHistoryOnly(t *testing.T) {
+	for _, kind := range []string{"history", "collision", "invalid", "hidden response"} {
+		t.Run(kind, func(t *testing.T) {
+			var calls atomic.Int32
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				var body struct {
+					Tools []struct {
+						Function struct {
+							Name string `json:"name"`
+						} `json:"function"`
+					} `json:"tools"`
+					Messages []struct {
+						Calls []struct {
+							Function struct {
+								Name string `json:"name"`
+							} `json:"function"`
+						} `json:"tool_calls"`
+					} `json:"messages"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				historicalName := ""
+				for _, m := range body.Messages {
+					for _, c := range m.Calls {
+						historicalName = c.Function.Name
+					}
+				}
+				if len(body.Tools) != 1 || body.Tools[0].Function.Name != "discover_tools" || historicalName != "usage_daily" {
+					t.Error("deferred schema exposed or history lost")
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if kind == "hidden response" {
+					fmt.Fprint(w, frame(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"forged","type":"function","function":{"name":"usage_daily","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)+frame("[DONE]"))
+					return
+				}
+				fmt.Fprint(w, frame(`{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`)+frame("[DONE]"))
+			}))
+			defer s.Close()
+			p, e := openai.New(openai.Config{Endpoint: s.URL})
+			if e != nil {
+				t.Fatal(e)
+			}
+			r := request()
+			r.Tools = []model.ToolDefinition{{Name: "discover_tools", Version: "1", Parameters: json.RawMessage(`{"type":"object"}`)}}
+			name := "usage.daily"
+			if kind == "collision" {
+				r.Tools = append(r.Tools, model.ToolDefinition{Name: "usage_daily", Version: "1", Parameters: json.RawMessage(`{"type":"object"}`)})
+			}
+			if kind == "invalid" {
+				name = "invalid name"
+			}
+			r.Messages = append(r.Messages, model.Message{Role: model.Assistant, ToolCalls: []model.ToolCall{{ID: "previous", Name: name, Arguments: json.RawMessage(`{}`)}}}, model.Message{Role: model.Tool, ToolCallID: "previous", Text: "fictional usage result"}, model.Message{Role: model.User, Text: "continue"})
+			_, e = p.Generate(context.Background(), r, func(string) error { return nil })
+			if kind == "history" {
+				if e != nil || calls.Load() != 1 {
+					t.Fatal(e)
+				}
+			} else if !errors.Is(e, openai.ErrProtocol) {
+				t.Fatalf("%s err=%v", kind, e)
+			}
+			if (kind == "collision" || kind == "invalid") && calls.Load() != 0 {
+				t.Fatal("invalid history reached network")
+			}
+		})
+	}
+}
